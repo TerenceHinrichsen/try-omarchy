@@ -41,6 +41,21 @@ class GhosttyMigrationTests(unittest.TestCase):
         factory.write_text(json.dumps(old_spec))
         return payload, root, factory
 
+    def prepare_previous_update(self, directory):
+        payload, root, factory = self.prepare(directory, 'ghostty-PKGBUILD-before-system-fontconfig')
+        # Revision 1 installed all of these files, including generated pins
+        # separate from the retained factory spec.
+        for name, (relative, mode) in extras.GROUPS['ghostty'].items():
+            target = root / relative
+            if name == 'ghostty-PKGBUILD':
+                continue
+            source = (GUEST / 'tests/fixtures/ghostty-build-spec-before-system-fontconfig.json'
+                      if name == 'ghostty-build-spec.json' else payload / name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            target.chmod(mode)
+        return payload, root, factory
+
     def test_update_repairs_menu_and_installer_pins_without_installing_ghostty(self):
         with tempfile.TemporaryDirectory() as directory:
             payload, root, factory = self.prepare(directory)
@@ -87,12 +102,30 @@ class GhosttyMigrationTests(unittest.TestCase):
 
     def test_update_replaces_the_bundled_fontconfig_recipe(self):
         with tempfile.TemporaryDirectory() as directory:
-            payload, root, factory = self.prepare(directory, 'ghostty-PKGBUILD-before-system-fontconfig')
+            payload, root, factory = self.prepare_previous_update(directory)
+            original_factory = factory.read_bytes()
             result = fixes.migrate(payload, root, True, '')
             self.assertEqual('applied', result['components']['ghostty'])
+            for name, (relative, mode) in extras.GROUPS['ghostty'].items():
+                target = root / relative
+                self.assertEqual((payload / name).read_bytes(), target.read_bytes())
+                self.assertEqual(mode, target.stat().st_mode & 0o777)
             recipe = root / extras.GROUPS['ghostty']['ghostty-PKGBUILD'][0]
-            self.assertEqual((payload / 'ghostty-PKGBUILD').read_bytes(), recipe.read_bytes())
             self.assertIn('-fsys=fontconfig', recipe.read_text())
+            self.assertEqual(original_factory, factory.read_bytes())
+            self.assertFalse((root / 'usr/bin/ghostty').exists())
+            result = fixes.migrate(payload, root, True, '')
+            self.assertEqual('current', result['components']['ghostty'])
+
+    def test_skipped_update_keeps_previously_migrated_recipe_and_pins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload, root, factory = self.prepare_previous_update(directory)
+            before = {relative: (root / relative).read_bytes()
+                      for relative, _ in extras.GROUPS['ghostty'].values()}
+            result = fixes.migrate(payload, root, False, '')
+            self.assertEqual('pending', result['components']['ghostty'])
+            for relative, data in before.items():
+                self.assertEqual(data, (root / relative).read_bytes())
 
     def test_skipped_update_keeps_the_previous_installer_and_pins(self):
         with tempfile.TemporaryDirectory() as directory:
